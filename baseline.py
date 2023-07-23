@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[8]:
 
 
 import os
@@ -30,7 +30,7 @@ from typing import List, Union
 from joblib import Parallel, delayed
 
 
-# In[2]:
+# In[9]:
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -39,7 +39,7 @@ device
 
 # ##### Hyper Parameters
 
-# In[3]:
+# In[10]:
 
 
 CFG = {
@@ -48,8 +48,8 @@ CFG = {
     'img_size': 224,
     'model': 'Unet',
     'epochs': 200,
-    'train_bs':16,
-    'valid_bs':16,
+    'train_bs':32,
+    'valid_bs':32,
     'lr': 1e-4, ## learning rate
     'num_workers': 8,
     'verbose_step': 1,
@@ -62,7 +62,7 @@ CFG = {
 
 # ###### WANDB Init & Model save name
 
-# In[4]:
+# In[11]:
 
 
 category = 'satellite'
@@ -73,7 +73,7 @@ user = 'hojunking'
 run_name = project_name + '_' + run_id
 
 
-# In[5]:
+# In[12]:
 
 
 def seed_everything(seed):
@@ -86,7 +86,7 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = True
 
 
-# In[6]:
+# In[13]:
 
 
 # RLE 디코딩 함수
@@ -111,7 +111,7 @@ def rle_encode(mask):
 
 # ##### Aumentation
 
-# In[7]:
+# In[14]:
 
 
 transform_train = A.Compose(    [   
@@ -128,9 +128,24 @@ transform_test = A.Compose([
 ])
 
 
+# In[15]:
+
+
+train_df = pd.read_csv('../Data/satellite/train.csv')
+img_path = train_df.iloc[0]['img_path']
+
+
+# In[16]:
+
+
+image = cv2.imread('../Data/satellite/'+ img_path)
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+image.shape[1]
+
+
 # ##### Dataset
 
-# In[8]:
+# In[17]:
 
 
 class SatelliteDataset(Dataset):
@@ -164,7 +179,7 @@ class SatelliteDataset(Dataset):
         return image, mask
 
 
-# In[9]:
+# In[18]:
 
 
 def prepare_dataloader(df, trn_idx, val_idx):
@@ -195,15 +210,13 @@ def prepare_dataloader(df, trn_idx, val_idx):
 
 # ##### Dice calculation
 
-# In[10]:
+# In[19]:
 
 
 def calculate_dice(pred_rle, gt_rle):
-    pred_mask = rle_decode(pred_rle, (CFG['img_size'],CFG['img_size']))
-    gt_mask = gt_rle.cpu().numpy()
-    print(f'GT: {gt_rle}')
-    print(f'pred: {pred_mask}')
-    
+    pred_mask = rle_decode(pred_rle, (CFG['img_size'], CFG['img_size']))
+    gt_mask = gt_rle
+
 
     if np.sum(gt_mask) > 0 or np.sum(pred_mask) > 0:
         return dice_score(pred_mask, gt_mask)
@@ -221,7 +234,7 @@ def dice_score(prediction: np.array, ground_truth: np.array, smooth=1e-7):#-> fl
 
 # ##### Model
 
-# In[11]:
+# In[20]:
 
 
 # U-Net의 기본 구성 요소인 Double Convolution Block을 정의합니다.
@@ -283,7 +296,7 @@ class UNet(nn.Module):
 
 # ##### Train
 
-# In[12]:
+# In[21]:
 
 
 def train_one_epoch(epoch, model, loss_fn, optimizer, train_loader, device, scheduler=None):
@@ -340,7 +353,7 @@ def train_one_epoch(epoch, model, loss_fn, optimizer, train_loader, device, sche
 
 # ##### Valid
 
-# In[13]:
+# In[22]:
 
 
 def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
@@ -354,7 +367,9 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
     avg_loss = 0
     image_preds_all = []
     image_targets_all = []
+
     prop_result = []
+    gt_encoded = []
     
     pbar = tqdm(enumerate(val_loader), total=len(val_loader))
     for step, (imgs, masks) in pbar:
@@ -377,12 +392,10 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
                 prop_result.append(mask_rle)
         
         
-        
-        
         image_preds_all += [torch.argmax(image_preds, 1).detach().cpu().numpy()]
         image_targets_all += [masks.detach().cpu().numpy()]
         
-        loss = loss = loss_fn(image_preds, masks.unsqueeze(1))
+        loss = loss_fn(image_preds, masks.unsqueeze(1))
         
         avg_loss += loss.item()
         loss_sum += loss.item()*masks.shape[0]
@@ -394,8 +407,7 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
 
     # CALCULATION DICE COEFFICIEN
     pred_mask_rle = prop_result
-    gt_mask_rle = masks
-
+    gt_mask_rle = image_targets_all
 
     dice_scores = Parallel(n_jobs=-1)(
             delayed(calculate_dice)(pred_rle, gt_rle) for pred_rle, gt_rle in zip(pred_mask_rle, gt_mask_rle)
@@ -409,24 +421,54 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
     return image_preds_all, val_loss, np.mean(dice_scores)
 
 
-# In[14]:
+# In[23]:
+
+
+class EarlyStopping:
+    def __init__(self, patience=10, verbose=False, delta=0):
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+
+    def __call__(self, score):
+        print(f' present score: {score}')
+        if self.best_score is None:
+            self.best_score = score
+        elif score <= self.best_score + self.delta:
+            self.counter += 1
+            print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            print(f'Best F1 score from now: {self.best_score}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+        
+        return self.early_stop
+
+
+# In[24]:
 
 
 if __name__ == '__main__':
     seed_everything(CFG['seed'])
     
-    # # WANDB TRACKER INIT
-    # wandb.init(project=project_name, entity=user)
-    # wandb.config.update(CFG)
-    # wandb.run.name = run_name
-    # wandb.define_metric("Train Loss", step_metric="epoch")
-    # wandb.define_metric("Valid Loss", step_metric="epoch")
-    # wandb.define_metric("Train-Valid Accuracy", step_metric="epoch")
+    # WANDB TRACKER INIT
+    wandb.init(project=project_name, entity=user)
+    wandb.config.update(CFG)
+    wandb.run.name = run_name
+    wandb.define_metric("Train Loss", step_metric="epoch")
+    wandb.define_metric("Valid Loss", step_metric="epoch")
+    wandb.define_metric("Train-Valid Coefficient", step_metric="epoch")
     
     model_dir = CFG['model_path'] + '/{}'.format(run_name)
     #train_dir = train.dir.values
     best_fold = 0
-    best_f1 =0.0
+    
     print('Model: {}'.format(CFG['model']))
     # MAKE MODEL DIR
     if not os.path.isdir(model_dir):
@@ -438,87 +480,86 @@ if __name__ == '__main__':
     
     # TEST PROCESS FOLD BREAK
     for fold, (trn_idx, val_idx) in enumerate(folds):
-        break
     
-    print(f'Start with train :{len(trn_idx)}, valid :{len(val_idx)}')
-    #print(f'Training start with fold: {fold} epoch: {CFG["epochs"]} \n')
-
-    # # EARLY STOPPING DEFINITION
-    # early_stopping = EarlyStopping(patience=CFG["patience"], verbose=True)
-
-    # DATALOADER DEFINITION
-    train_loader, val_loader = prepare_dataloader(train_df, trn_idx, val_idx)
-
-    # MODEL & DEVICE DEFINITION 
-    device = torch.device(CFG['device'])
-    model =UNet()
+        print(f'Start with train :{len(trn_idx)}, valid :{len(val_idx)}')
+        #print(f'Training start with fold: {fold} epoch: {CFG["epochs"]} \n')
     
-    # # MODEL FREEZING
-    # #model.freezing(freeze = CFG['freezing'], trainable_layer = CFG['trainable_layer'])
-    # if CFG['freezing'] ==True:
-    #     for name, param in model.named_parameters():
-    #         if param.requires_grad == True:
-    #             print(f"{name}: {param.requires_grad}")
-
-    model.to(device)
-    # MODEL DATA PARALLEL
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-
-    scaler = torch.cuda.amp.GradScaler()   
-    optimizer = torch.optim.Adam(model.parameters(), lr=CFG['lr'])
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.5, step_size=5)
-
-    # CRITERION (LOSS FUNCTION)
-    loss_tr = torch.nn.BCEWithLogitsLoss()
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-
-    # wandb.watch(model, loss_tr, log='all')
-
-    start = time.time()
-    print(f'Fold: {fold}')
-    for epoch in range(CFG['epochs']):
-        print('Epoch {}/{}'.format(epoch, CFG['epochs'] - 1))
-
-        # TRAINIG
-        # train_preds_all, train_loss = train_one_epoch(epoch, model, loss_tr,
-        #                                                             optimizer, train_loader, device, scheduler=scheduler)
-        # wandb.log({'Train Accuracy':train_acc, 'Train Loss' : train_loss, 'Train F1': train_f1, 'epoch' : epoch})
-
-        # VALIDATION
-        with torch.no_grad():
-            valid_preds_all, valid_loss, valid_dice= valid_one_epoch(epoch, model, loss_fn,
-                                                                    val_loader, device, scheduler=None)
-            # wandb.log({'Valid Accuracy':valid_acc, 'Valid Loss' : valid_loss, 'Valid F1': valid_f1 ,'epoch' : epoch})
-        print(f'Epoch [{epoch}], Train Loss : [{train_loss :.5f}] Val Loss : [{valid_loss :.5f}] Val F1 Score : [{valid_dice:.5f}]')
+        # EARLY STOPPING DEFINITION
+        early_stopping = EarlyStopping(patience=CFG["patience"], verbose=True)
+    
+        # DATALOADER DEFINITION
+        train_loader, val_loader = prepare_dataloader(train_df, trn_idx, val_idx)
+    
+        # MODEL & DEVICE DEFINITION 
+        device = torch.device(CFG['device'])
+        model =UNet()
         
-        # SAVE ALL RESULTS
-        valid_dice_list = []
-
-        # MODEL SAVE (THE BEST MODEL OF ALL OF FOLD PROCESS)
-        if valid_f1 > best_dice:
-            best_f1 = valid_dice
-            best_epoch = epoch
-            # SAVE WITH DATAPARARELLEL WRAPPER
-            #torch.save(model.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
-            # SAVE WITHOUT DATAPARARELLEL WRAPPER
-            torch.save(model.module.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
-
-        # # EARLY STOPPING
-        # stop = early_stopping(valid_f1)
-        # if stop:
-        #     print("stop called")   
-        #     break
-
-    end = time.time() - start
-    time_ = str(datetime.timedelta(seconds=end)).split(".")[0]
-    print("time :", time_)
-
-    # PRINT BEST F1 SCORE MODEL OF FOLD
-    best_index = valid_dice_list.index(max(valid_dice_list))
-    print(f'fold: {fold}, Best Epoch : {best_index}/ {len(valid_dice_list)}')
-    print(f'Best valid_dice_list : {valid_dice_list[best_index]:.5f}')
-    print('-----------------------------------------------------------------------')
+        # # MODEL FREEZING
+        # #model.freezing(freeze = CFG['freezing'], trainable_layer = CFG['trainable_layer'])
+        # if CFG['freezing'] ==True:
+        #     for name, param in model.named_parameters():
+        #         if param.requires_grad == True:
+        #             print(f"{name}: {param.requires_grad}")
+    
+        model.to(device)
+        # MODEL DATA PARALLEL
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+    
+        scaler = torch.cuda.amp.GradScaler()   
+        optimizer = torch.optim.Adam(model.parameters(), lr=CFG['lr'])
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.5, step_size=5)
+    
+        # CRITERION (LOSS FUNCTION)
+        loss_tr = torch.nn.BCEWithLogitsLoss()
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+    
+        wandb.watch(model, loss_tr, log='all')
+    
+        start = time.time()
+        print(f'Fold: {fold}')
+        for epoch in range(CFG['epochs']):
+            print('Epoch {}/{}'.format(epoch, CFG['epochs'] - 1))
+    
+            # TRAINIG
+            train_preds_all, train_loss = train_one_epoch(epoch, model, loss_tr,
+                                                                        optimizer, train_loader, device, scheduler=scheduler)
+            wandb.log({'Train Loss' : train_loss, 'epoch' : epoch})
+    
+            # VALIDATION
+            with torch.no_grad():
+                valid_preds_all, valid_loss, valid_dice= valid_one_epoch(epoch, model, loss_fn,
+                                                                        val_loader, device, scheduler=None)
+                wandb.log({'Valid Loss' : valid_loss, 'Valid Coefficient': valid_dice ,'epoch' : epoch})
+            print(f'Epoch [{epoch}], Train Loss : [{train_loss :.5f}] Val Loss : [{valid_loss :.5f}] Val F1 Score : [{valid_dice:.5f}]')
+            
+            # SAVE ALL RESULTS
+            valid_dice_list = []
+    
+            # MODEL SAVE (THE BEST MODEL OF ALL OF FOLD PROCESS)
+            if valid_f1 > best_dice:
+                best_f1 = valid_dice
+                best_epoch = epoch
+                # SAVE WITH DATAPARARELLEL WRAPPER
+                #torch.save(model.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
+                # SAVE WITHOUT DATAPARARELLEL WRAPPER
+                torch.save(model.module.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
+    
+            # EARLY STOPPING
+            stop = early_stopping(valid_dice)
+            if stop:
+                print("stop called")   
+                break
+    
+        end = time.time() - start
+        time_ = str(datetime.timedelta(seconds=end)).split(".")[0]
+        print("time :", time_)
+    
+        # PRINT BEST F1 SCORE MODEL OF FOLD
+        best_index = valid_dice_list.index(max(valid_dice_list))
+        print(f'fold: {fold}, Best Epoch : {best_index}/ {len(valid_dice_list)}')
+        print(f'Best valid_dice_list : {valid_dice_list[best_index]:.5f}')
+        print('-----------------------------------------------------------------------')
 
     # K-FOLD END
     if valid_dice_list[best_index] > best_fold:
@@ -530,7 +571,36 @@ if __name__ == '__main__':
 # In[ ]:
 
 
+test_df =pd.read_csv('../Data/satellite/test.csv')
 
+
+# In[ ]:
+
+
+test_dataset = SatelliteDataset(test_df, transform=transform_test, infer=True)
+test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=8)
+
+
+# In[ ]:
+
+
+with torch.no_grad():
+    model.eval()
+    result = []
+    for images in tqdm(test_dataloader):
+        images = images.float().to(device)
+        
+        outputs = model(images)
+        masks = torch.sigmoid(outputs).cpu().numpy()
+        masks = np.squeeze(masks, axis=1)
+        masks = (masks > 0.35).astype(np.uint8) # Threshold = 0.35
+        
+        for i in range(len(images)):
+            mask_rle = rle_encode(masks[i])
+            if mask_rle == '': # 예측된 건물 픽셀이 아예 없는 경우 -1
+                result.append(-1)
+            else:
+                result.append(mask_rle)
 
 
 # In[ ]:
