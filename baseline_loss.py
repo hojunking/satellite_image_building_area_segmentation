@@ -12,7 +12,6 @@ import time
 import datetime as dt
 import random
 
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -96,7 +95,6 @@ def rle_decode(mask_rle, shape):
     else:
         s = mask_rle.split()
     starts, lengths = [np.asarray(x, dtype=int) for x in (s [0:][::2], s [1:][::2])]
-    starts -= 1
     ends = starts + lengths
     img = np.zeros(shape [0]*shape [1], dtype=np.uint8)
     for lo, hi in zip(starts, ends):
@@ -209,32 +207,6 @@ def prepare_dataloader(df, trn_idx, val_idx):
         pin_memory=True,
     )
     return train_loader, val_loader
-
-
-# ##### Dice calculation
-
-# In[29]:
-
-
-def calculate_dice(pred_rle, gt_rle):
-    print(f'pred_rle: {pred_rle}')
-    
-    pred_mask = rle_decode(pred_rle,  (CFG['img_size'], CFG['img_size']))
-    gt_mask = gt_rle
-
-
-    if np.sum(gt_mask) > 0 or np.sum(pred_mask) > 0:
-        return dice_score(pred_mask, gt_mask)
-    else:
-        return None  # No valid masks found, return None
-
-        
-def dice_score(prediction: np.array, ground_truth: np.array, smooth=1e-7):#-> float:
-    '''
-    Calculate Dice Score between two binary masks.
-    '''
-    intersection = np.sum(prediction * ground_truth)
-    return (2.0 * intersection + smooth) / (np.sum(prediction) + np.sum(ground_truth) + smooth)
 
 
 # ##### Model
@@ -372,9 +344,6 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
     avg_loss = 0
     image_preds_all = []
     image_targets_all = []
-
-    prop_result = []
-    gt_encoded = []
     
     pbar = tqdm(enumerate(val_loader), total=len(val_loader))
     for step, (imgs, masks) in pbar:
@@ -383,22 +352,8 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
         
         # MODEL PREDICTION
         image_preds = model(imgs)
-
-        # OUTPUT VALUE
-        pred_masks = torch.sigmoid(image_preds).cpu().numpy()
-        pred_masks = np.squeeze(pred_masks, axis=1)
-        pred_masks = (pred_masks > 0.35).astype(np.uint8) # Threshold = 0.35
-        
-        for i in range(len(imgs)):
-            mask_rle = rle_encode(pred_masks[i])
-            if mask_rle == '': # 예측된 건물 픽셀이 아예 없는 경우 -1
-                prop_result.append(-1)
-            else:
-                prop_result.append(mask_rle)
-        
         
         image_preds_all += [torch.argmax(image_preds, 1).detach().cpu().numpy()]
-        
         image_targets_all += [masks.detach().cpu().numpy()]
         
         loss = loss_fn(image_preds, masks.unsqueeze(1))
@@ -410,21 +365,12 @@ def valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None):
         # TQDM
         description = f'epoch {epoch} loss: {loss_sum/sample_num:.4f}'
         pbar.set_description(description)
-
-    # CALCULATION DICE COEFFICIEN
-    pred_mask_rle = prop_result
-    gt_mask_rle = image_targets_all
-
-    dice_scores = Parallel(n_jobs=-1)(
-            delayed(calculate_dice)(pred_rle, gt_rle) for pred_rle, gt_rle in zip(pred_mask_rle, gt_mask_rle)
-    )
-    dice_scores = [score for score in dice_scores if score is not None]  # Exclude None values
     
     image_preds_all = np.concatenate(image_preds_all)
     image_targets_all = np.concatenate(image_targets_all)
     val_loss = avg_loss/len(val_loader)
     
-    return image_preds_all, val_loss, np.mean(dice_scores)
+    return image_preds_all, val_loss
 
 
 # In[23]:
@@ -444,10 +390,10 @@ class EarlyStopping:
         print(f' present score: {score}')
         if self.best_score is None:
             self.best_score = score
-        elif score <= self.best_score + self.delta:
+        elif score >= self.best_score + self.delta:
             self.counter += 1
             print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            print(f'Best dice from now: {self.best_score}')
+            print(f'Best loss from now: {self.best_score :.5f}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
@@ -474,7 +420,7 @@ if __name__ == '__main__':
     model_dir = CFG['model_path'] + '/{}'.format(run_name)
     #train_dir = train.dir.values
     best_fold = 0
-    best_dice = 0
+    best_loss = 1
     print('Model: {}'.format(CFG['model']))
     # MAKE MODEL DIR
     if not os.path.isdir(model_dir):
@@ -488,7 +434,7 @@ if __name__ == '__main__':
     for fold, (trn_idx, val_idx) in enumerate(folds):
     
         print(f'Start with train :{len(trn_idx)}, valid :{len(val_idx)}')
-        #print(f'Training start with fold: {fold} epoch: {CFG["epochs"]} \n')
+        print(f'Training start with fold: {fold} epoch: {CFG["epochs"]} \n')
     
         # EARLY STOPPING DEFINITION
         early_stopping = EarlyStopping(patience=CFG["patience"], verbose=True)
@@ -528,23 +474,21 @@ if __name__ == '__main__':
             print('Epoch {}/{}'.format(epoch, CFG['epochs'] - 1))
     
             # TRAINIG
-            train_preds_all, train_loss = train_one_epoch(epoch, model, loss_tr,
-                                                                        optimizer, train_loader, device, scheduler=scheduler)
+            train_preds_all, train_loss = train_one_epoch(epoch, model, loss_tr, optimizer, train_loader, device, scheduler=scheduler)
             wandb.log({'Train Loss' : train_loss, 'epoch' : epoch})
     
             # VALIDATION
             with torch.no_grad():
-                valid_preds_all, valid_loss, valid_dice= valid_one_epoch(epoch, model, loss_fn,
-                                                                        val_loader, device, scheduler=None)
-                wandb.log({'Valid Loss' : valid_loss, 'Valid Coefficient': valid_dice ,'epoch' : epoch})
-            print(f'Epoch [{epoch}], Train Loss : [{train_loss :.5f}] Val Loss : [{valid_loss :.5f}] Val F1 Score : [{valid_dice:.5f}]')
+                valid_preds_all, valid_loss = valid_one_epoch(epoch, model, loss_fn, val_loader, device, scheduler=None)
+                wandb.log({'Valid Loss' : valid_loss ,'epoch' : epoch})
+            print(f'Epoch [{epoch}], Train Loss : [{train_loss :.5f}] Val Loss : [{valid_loss :.5f}]')
             
             # SAVE ALL RESULTS
-            valid_dice_list = []
+            valid_loss_list = []
     
             # MODEL SAVE (THE BEST MODEL OF ALL OF FOLD PROCESS)
-            if valid_dice > best_dice:
-                best_dice = valid_dice
+            if valid_loss > best_loss:
+                best_loss = valid_loss
                 best_epoch = epoch
                 # SAVE WITH DATAPARARELLEL WRAPPER
                 #torch.save(model.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
@@ -552,7 +496,7 @@ if __name__ == '__main__':
                 torch.save(model.module.state_dict(), (model_dir+'/{}.pth').format(CFG['model']))
     
             # EARLY STOPPING
-            stop = early_stopping(valid_dice)
+            stop = early_stopping(valid_loss)
             if stop:
                 print("stop called")   
                 break
@@ -562,16 +506,16 @@ if __name__ == '__main__':
         print("time :", time_)
     
         # PRINT BEST F1 SCORE MODEL OF FOLD
-        best_index = valid_dice_list.index(max(valid_dice_list))
-        print(f'fold: {fold}, Best Epoch : {best_index}/ {len(valid_dice_list)}')
-        print(f'Best valid_dice_list : {valid_dice_list[best_index]:.5f}')
+        best_index = valid_loss_list.index(max(valid_loss_list))
+        print(f'fold: {fold}, Best Epoch : {best_index}/ {len(valid_loss_list)}')
+        print(f'Best valid_loss : {valid_loss_list[best_index]:.5f}')
         print('-----------------------------------------------------------------------')
 
     # K-FOLD END
-    if valid_dice_list[best_index] > best_fold:
-        best_fold = valid_dice_list[best_index]
+    if valid_loss_list[best_index] < best_fold:
+        best_fold = valid_loss_list[best_index]
         top_fold = fold
-    print(f'Best valid_dice: {best_fold} Top fold : {top_fold}')
+    print(f'Best valid_loss: {best_fold} Top fold : {top_fold}')
 
 
 # In[ ]:
