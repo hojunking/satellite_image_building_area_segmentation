@@ -52,7 +52,7 @@ CFG = {
     'lr': 1e-4, ## learning rate
     'num_workers': 8,
     'verbose_step': 1,
-    'patience' : 5,
+    'patience' : 10,
     'device': 'cuda:0',
     'freezing': False,
     'model_path': './models'
@@ -116,7 +116,7 @@ def rle_encode(mask):
 
 
 transform_train = A.Compose(    [   
-    A.RandomResizedCrop(p=1, height=CFG['img_size'] ,width=CFG['img_size'], scale=(0.55, 0.75),ratio=(0.90, 1.10)),
+    A.RandomResizedCrop(p=1, height=CFG['img_size'] ,width=CFG['img_size'], scale=(0.65, 0.85),ratio=(0.90, 1.10)),
     A.HorizontalFlip(p=0.5),
     A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, always_apply=True, p=1.0),
     A.pytorch.transforms.ToTensorV2()
@@ -484,8 +484,7 @@ if __name__ == '__main__':
                 wandb.log({'Valid Loss' : valid_loss ,'epoch' : epoch})
             print(f'Epoch [{epoch}], Train Loss : [{train_loss :.5f}] Val Loss : [{valid_loss :.5f}]')
             
-
-    
+            valid_loss_list.append(valid_loss)
             # MODEL SAVE (THE BEST MODEL OF ALL OF FOLD PROCESS)
             if valid_loss < best_loss:
                 best_loss = valid_loss
