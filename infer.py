@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[12]:
+# In[1]:
 
 
 import os
@@ -30,7 +30,7 @@ from joblib import Parallel, delayed
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-# In[13]:
+# In[2]:
 
 
 # RLE 디코딩 함수
@@ -53,20 +53,21 @@ def rle_encode(mask):
     return ' '. join(str(x) for x in runs)
 
 
-# In[14]:
+# In[3]:
 
 
 class SatelliteDataset(Dataset):
-    def __init__(self, csv_file, transform=None, infer=False):
-        self.data = pd.read_csv('../Data/satellite/' + csv_file)
+    def __init__(self, df, transform=None, infer=False):
+        super(SatelliteDataset,self).__init__()
+        self.df = df.reset_index(drop=True).copy()
         self.transform = transform
         self.infer = infer
 
     def __len__(self):
-        return len(self.data)
+        return len(self.df)
 
     def __getitem__(self, idx):
-        img_path = self.data.iloc[idx, 1]
+        img_path = self.df.iloc[idx]['img_path']
         image = cv2.imread('../Data/satellite/'+ img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
@@ -75,7 +76,7 @@ class SatelliteDataset(Dataset):
                 image = self.transform(image=image)['image']
             return image
 
-        mask_rle = self.data.iloc[idx, 2]
+        mask_rle = self.df.iloc[idx]['mask_rle']
         mask = rle_decode(mask_rle, (image.shape[0], image.shape[1]))
 
         if self.transform:
@@ -86,7 +87,7 @@ class SatelliteDataset(Dataset):
         return image, mask
 
 
-# In[15]:
+# In[4]:
 
 
 transform_train = A.Compose(    [   
@@ -103,7 +104,7 @@ transform_test = A.Compose([
 ])
 
 
-# In[16]:
+# In[5]:
 
 
 # U-Net의 기본 구성 요소인 Double Convolution Block을 정의합니다.
@@ -163,14 +164,24 @@ class UNet(nn.Module):
         return out
 
 
-# In[18]:
+# In[6]:
 
 
 # model 초기화
 model = UNet().to(device)
 load_model = 'models' + '/satellite_202307270301/Unet.pth'
 test_dataset = SatelliteDataset(csv_file='./test.csv', transform=transform_test, infer=True)
-test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=8)
+test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=8)
+
+# MODEL DATA PARALLEL
+if torch.cuda.device_count() > 1:
+    model = nn.DataParallel(model)
+
+
+# In[7]:
+
+
+test_dataset
 
 
 # In[19]:
